@@ -1,4 +1,4 @@
-#![cfg_attr(not(test), no_std)]
+//#![cfg_attr(not(test), no_std)]
 use thiserror_no_std::Error;
 
 use core::cmp::{max, min};
@@ -147,12 +147,52 @@ impl<
         2 + self.num_inode_blocks()
     }
 
+    // realised I will be using these claulations alot so I just added some simlple methods
+    pub fn byte_index(&self, num: usize) -> usize {
+        num / 8
+    }
+
+    pub fn bit_pos(&self, num: usize) -> usize {
+        num % 8 
+    }
+
     pub fn directory_exists(&mut self) -> bool {
-        todo!("Read block INODE_FULL_BLOCK from disk. If it does not start with a zero, the directory exists.");
+        let mut block = [0u8; BLOCK_SIZE];
+        self.disk.read(INODE_FULL_BLOCK, &mut block).unwrap();
+
+        block[0] != 0 // returns the bool, if the 0 index is not 0, then we get a True
+
+        //todo!("Read block INODE_FULL_BLOCK from disk. If it does not start with a zero, the directory exists.");
     }
 
     pub fn load_file_bytes(&mut self, inode: &Inode<MAX_FILE_BLOCKS, BLOCK_SIZE>) {
-        todo!("Read the file pointed to by inode into the file content buffer.");
+        let mut offset = 0;
+
+        for i in 0..self.num_inode_blocks() {
+            let block_num = inode.blocks[i];
+
+            self.disk.read(block_num.into(), &mut self.block_buffer).unwrap();
+
+            let bytes_to_copy = 
+            if offset + BLOCK_SIZE > MAX_FILE_BYTES {
+                MAX_FILE_BYTES - offset // Don't exceed the file content buffer
+            } else {
+                BLOCK_SIZE // Copy the full block if there's enough space in the buffer
+            };
+    
+            // Copy the block's contents into the file content buffer
+            self.file_content_buffer[offset..offset + bytes_to_copy]
+                .copy_from_slice(&self.block_buffer[..bytes_to_copy]);
+    
+            // Update the offset to point to the next available space in the file content buffer
+            offset += bytes_to_copy;
+            
+            if offset >= MAX_FILE_BYTES {
+                break;
+            
+            }
+        }
+        //todo!("Read the file pointed to by inode into the file content buffer.");
         // For each inode block in use
         //   Figure out the disk block referenced by that inode block
         //   Read the block from disk into the block buffer
@@ -160,7 +200,36 @@ impl<
     }
 
     pub fn save_file_bytes(&mut self, inode: &Inode<MAX_FILE_BLOCKS, BLOCK_SIZE>) {
-        todo!("Write the file pointed to by inode from the file content buffer onto the disk.");
+        
+        let mut offset = 0;
+        for i in 00..self.num_inode_blocks() {
+            let reference = inode.blocks[i];
+
+            // Read the current block's data into the block buffer
+            self.disk.read(reference.into(), &mut self.block_buffer).unwrap();
+
+            // Calculate how many bytes to copy from the file content buffer
+            let bytes_to_copy = if offset + BLOCK_SIZE > MAX_FILE_BYTES {
+                MAX_FILE_BYTES - offset // Don't exceed the file content buffer
+            } else {
+                BLOCK_SIZE // Copy the full block if there's enough space in the buffer
+            };
+            // Copy the appropriate part of the file_content_buffer into the block_buffer
+            self.block_buffer[..bytes_to_copy]
+                .copy_from_slice(&self.file_content_buffer[offset..offset + bytes_to_copy]);
+
+            // Write the modified block buffer back to the disk
+            self.disk.write(reference.into(), &self.block_buffer).unwrap(); 
+
+            // Update the offset to point to the next available space in the file content buffer
+            offset += bytes_to_copy;
+
+            // If we've written all the bytes in the file content buffer, stop
+            if offset >= MAX_FILE_BYTES {
+                break;
+            }
+         }
+        //todo!("Write the file pointed to by inode from the file content buffer onto the disk.");
         // For each inode block in use
         //   Figure out the disk block referenced by that inode block
         //   Copy the bytes for this block into the block buffer
@@ -168,28 +237,67 @@ impl<
     }
 
     pub fn activate_bit(&mut self, bit: usize, block: usize) {
-        todo!("Set bit `bit` within `block` to 1.");
+        
+        self.disk.read(block, &mut self.block_buffer).unwrap();
+
+        self.block_buffer[self.byte_index(bit)] |= 1 << self.bit_pos(bit); // |= is | assignment, self.byte_index & bit_pos on ln 150
+
+        self.disk.write(block, &self.block_buffer).unwrap();
+        //todo!("Set bit `bit` within `block` to 1.");
         // Read the block into the block buffer.
         // Set the appropriate bit to 1.
         // Write the block back to the disk.
     }
 
     fn request_data_block(&mut self) -> anyhow::Result<u8, FileSystemError> {
-        todo!("Find a data block number to meet a block request.");
-        // Find the lowest unused data block.
-        // * If there are no unused data blocks, return a DiskFull error.
-        // * If the lowest unused data block meets or exceeds NUM_BLOCKS,
-        //   return a DiskFull error.
-        // Activate that bit in the data-in-use block (i.e., DATA_FULL_BLOCK)
-        // Return that block number.
+        // Check if there are available data blocks
+        if self.disk.num_blocks() >= MAX_FILE_BLOCKS {
+            return Err(FileSystemError::DiskFull);
+        }
+    
+        // Loop through the available data blocks
+        for block in self.first_data_block()..self.num_data_blocks() {
+            // Read the block bitmap (DATA_FULL_BLOCK) into the block buffer
+            self.disk.read(DATA_FULL_BLOCK, &mut self.block_buffer).unwrap();
+    
+            // Check if the block is free (bit is not set)
+            if self.block_buffer[self.byte_index(block)] & (1 << self.bit_pos(block)) == 0 {
+                // Mark the block as used by setting the corresponding bit to 1
+                self.block_buffer[self.byte_index(block)] |= 1 << self.bit_pos(block);
+    
+                // Write the updated block bitmap back to disk
+                self.disk.write(DATA_FULL_BLOCK, &self.block_buffer).unwrap();
+    
+                // Return the allocated block number
+                return Ok(block as u8);
+            }
+        }
+    
+        // If no free block was found, return a DiskFull error
+        Err(FileSystemError::DiskFull)
     }
 
     fn clear_block_buffer(&mut self) {
-        todo!("Set all elements of the block buffer to zero.");
+        self.block_buffer.fill(0);
     }
 
     pub fn inode_table_inode(&mut self) -> Inode<MAX_FILE_BLOCKS, BLOCK_SIZE> {
-        todo!("Create an inode for the inode table");
+        let bytes_stored = self.num_inode_entries();
+
+        let mut blocks = [0u8; MAX_FILE_BLOCKS];
+        let first_inode_block = 2;
+        let last_inode_block = self.first_data_block();
+
+        for i in first_inode_block..last_inode_block {
+            blocks[(i - first_inode_block) as usize] = i as u8;
+        }
+
+        Inode {
+            bytes_stored: bytes_stored as u16,
+            blocks,
+        }
+        
+        //todo!("Create an inode for the inode table");
         // The `bytes_stored` will be the number of inode entries. 
         // * Use `num_inode_entries()`` to obtain this value.
         // Create an array of size MAX_FILE_BLOCKS to contain the block 
@@ -199,24 +307,41 @@ impl<
     }
 
     fn save_inode(&mut self, inode_num: usize, inode: &Inode<MAX_FILE_BLOCKS, BLOCK_SIZE>) {
-        todo!("Update the entry in the inode table for the given inode.");
-        // Call `inode_table_inode()` to get the inode table's inode.
-        // Load the inode talbe into the file content buffer using load_file_bytes().
-        // Call `update_inode_table()` to alter the table entry in the file content buffer.
-        // Call `save_file_bytes()` to output the file content buffer back to disk.
+        // Step 1: Get the inode for the inode table
+        let inode_table_inode = self.inode_table_inode();
+    
+        // Step 2: Load the inode table into the file content buffer (block_buffer)
+        self.load_file_bytes(&inode_table_inode);
+    
+        // Step 3: Update the inode table entry at the given inode_num
+        inode_table_inode.update_inode_table(inode_num, &mut self.block_buffer);
+    
+        // Step 4: Save the updated inode table back to disk
+        self.save_file_bytes(&inode_table_inode);
     }
 
     fn load_inode(&mut self, inode_num: usize) -> Inode<MAX_FILE_BLOCKS, BLOCK_SIZE> {
-        todo!("Load the designated inode from disk");
-        // Use `inode_table_inode()` to get the inode for the inode table.
-        // Use `load_file_bytes()` to load the table into the file content buffer.
-        // `num_inode_bytes()` gives the size of an inode. Multiply that by the inode number to
-        //   figure out where the inode is located in the buffer.
-        // Use `Inode::from_bytes()` to build and return the inode.
+        // Step 1: Get the inode for the inode table
+        let p_inode = self.inode_table_inode();
+    
+        // Step 2: Load the inode table into the file content buffer (block_buffer)
+        self.load_file_bytes(&p_inode);
+    
+        // Step 3: Calculate the position of the inode within the buffer
+        let position = self.num_inode_bytes() * inode_num;
+    
+        // Step 4: Extract the inode from the buffer and return it
+        Inode::from_bytes(&self.block_buffer[position..position + self.num_inode_bytes()])
     }
 
     fn mark_inode_blocks_in_use(&mut self) {
-        todo!("Call activate_bit() for each inode block to mark all of the inode blocks as being in use.")
+    
+        for i in 0..self.num_inode_blocks() {
+            let block = 2 + i;
+            println!("Marking block {} as in use", block);
+            self.activate_bit(block, DATA_FULL_BLOCK);
+        }
+        //todo!("Call activate_bit() for each inode block to mark all of the inode blocks as being in use.")
     }
 
     fn initialize_new_file(
@@ -224,14 +349,22 @@ impl<
         inode_num: usize,
         first_block: u8,
     ) -> Inode<MAX_FILE_BLOCKS, BLOCK_SIZE> {
-        todo!("create a new file!")
-        // Create a new inode using first_block.
-        // Call save_inode() to create a table entry for it.
-        // Call activate_bit() to activate the inode bit in INODE_FULL_BLOCK as well
-        //   as the `first_block` bit in DATA_FULL_BLOCK.
-        // Call clear_block_buffer() and write it out to `first_block` on disk. 
-        //   * This is not strictly necessary, but it makes the unit test conditions easier to write.
-        // Return the newly created inode.
+            // Step 1: Create a new inode using first_block.
+        let mut inode = Inode::new(first_block);
+
+        // Step 2: Save the inode to the inode table.
+        self.save_inode(inode_num, &inode);
+
+        // Step 3: Activate the inode bit in INODE_FULL_BLOCK and the first block bit in DATA_FULL_BLOCK.
+        self.activate_bit(inode_num, INODE_FULL_BLOCK);  // Activate the inode bit in INODE_FULL_BLOCK
+        self.activate_bit(first_block as usize, DATA_FULL_BLOCK);  // Activate the first data block in DATA_FULL_BLOCK
+
+        // Step 4: Clear the block buffer and write it out to first_block on disk.
+        self.clear_block_buffer();  // Clears the block buffer
+        self.disk.write(first_block as usize, &self.block_buffer).unwrap();  // Write the cleared buffer to the first block
+
+        // Step 5: Return the newly created inode.
+        inode
     }
 
     fn directory_inode(&mut self) -> Inode<MAX_FILE_BLOCKS, BLOCK_SIZE> {
@@ -297,7 +430,7 @@ impl<
         // For every file entry in the directory
         //   Check each character in the filename against the filename byte stored for that entry
         //   If it is a match (either zero-terminated or having the maximum length for a filename),
-        //     Return the index along with the inode (using `inode_for()`)
+        //     Return the index along with the inode (using `Inode::from_bytes()`)
         // If we don't find a match, return a FileNotFound error.
     }
 
@@ -318,7 +451,7 @@ impl<
             return Err(FileSystemError::FilenameTooLong(MAX_FILENAME_BYTES));
         }
         match self.inode_for(filename) {
-            Ok((inode_num, inode)) => self.open_create_reset(inode_num, inode),
+            Result::Ok((inode_num, inode)) => self.open_create_reset(inode_num, inode),
             Err(e) => match e {
                 FileSystemError::FileNotFound => self.open_create_new(filename),
                 other => Err(other),
@@ -477,14 +610,33 @@ impl<const MAX_BLOCKS: usize, const BLOCK_SIZE: usize> Inode<MAX_BLOCKS, BLOCK_S
     }
 
     pub fn from_bytes(buffer: &[u8]) -> Self {
-        todo!("Build an Inode from the information in the buffer");
+        let bytes_stored = u16::from_le_bytes([buffer[0], buffer[1]]);
+        let mut blocks = [0u8; MAX_BLOCKS];
+        
+        blocks.copy_from_slice(&buffer[2..(2 + MAX_BLOCKS)]);
+        
+        Self {
+            bytes_stored,
+            blocks,
+        }
+        //todo!("Build an Inode from the information in the buffer");
         // Low-order bits of bytes_stored come from buffer[0]
         // High-order bits of bytes_stored come from buffer[1]
         // The blocks come from the remaining elements of buffer.
     }
 
     pub fn update_inode_table(&self, offset: usize, table_buffer: &mut [u8]) {
-        todo!("Update the inode table at the given offset with info from this Inode.");
+        table_buffer[offset] = self.bytes_stored as u8;
+
+        // Update the high-order bits of bytes_stored
+        table_buffer[offset + 1] = (self.bytes_stored >> 8) as u8;
+    
+        // Copy the blocks into the table buffer
+        let start_index = offset + 2;
+        for (i, &block) in self.blocks.iter().enumerate() {
+            table_buffer[start_index + i] = block;
+        }
+        //todo!("Update the inode table at the given offset with info from this Inode.");
         // All references to `table_buffer` are relative to `offset`
         // Set the low-order bits of `bytes_stored` at `offset`.
         // Set the high-order bits of `bytes_stored` at the next element.
@@ -1000,7 +1152,7 @@ mod tests {
         sys.write(f1, "This is a test.".as_bytes()).unwrap();
         sys.close(f1).unwrap();
         match sys.open_read("one.tx") {
-            Ok(_) => panic!("Shouldn't have found the file"),
+            Result::Ok(_) => panic!("Shouldn't have found the file"),
             Err(e) => assert_eq!(e, FileSystemError::FileNotFound),
         }
     }
@@ -1014,7 +1166,7 @@ mod tests {
         let fd = sys.open_read("one.txt").unwrap();
         let mut buffer = [0; 10];
         match sys.read(fd + 1, &mut buffer) {
-            Ok(_) => panic!("Should be an error!"),
+            Result::Ok(_) => panic!("Should be an error!"),
             Err(e) => assert_eq!(e, FileSystemError::FileNotOpen),
         }
     }
@@ -1026,7 +1178,7 @@ mod tests {
         sys.write(f1, "This is a test.".as_bytes()).unwrap();
         let mut buffer = [0; 10];
         match sys.read(f1, &mut buffer) {
-            Ok(_) => panic!("Should not work!"),
+            Result::Ok(_) => panic!("Should not work!"),
             Err(e) => assert_eq!(e, FileSystemError::NotOpenForRead),
         }
     }
@@ -1039,7 +1191,7 @@ mod tests {
         sys.close(f1).unwrap();
         let f2 = sys.open_read("one.txt").unwrap();
         match sys.write(f2, "this is also a test".as_bytes()) {
-            Ok(_) => panic!("Should be an error"),
+            Result::Ok(_) => panic!("Should be an error"),
             Err(e) => assert_eq!(e, FileSystemError::NotOpenForWrite),
         }
     }
@@ -1048,7 +1200,7 @@ mod tests {
     fn test_filename_too_long() {
         let mut sys = make_clear_fs();
         match sys.open_create("this_is_an_exceedingly_long_filename_to_use.txt") {
-            Ok(_) => panic!("This should be an error"),
+            Result::Ok(_) => panic!("This should be an error"),
             Err(e) => assert_eq!(
                 e,
                 FileSystemError::FilenameTooLong(sys.max_filename_length())
@@ -1062,7 +1214,7 @@ mod tests {
         let f1 = sys.open_create("one.txt").unwrap();
         sys.write(f1, "This is a test.".as_bytes()).unwrap();
         match sys.open_read("one.txt") {
-            Ok(_) => panic!("Should be an error"),
+            Result::Ok(_) => panic!("Should be an error"),
             Err(e) => assert_eq!(e, FileSystemError::AlreadyOpen),
         }
     }
@@ -1075,7 +1227,7 @@ mod tests {
             sys.write(f1, "A".as_bytes()).unwrap();
         }
         match sys.write(f1, "B".as_bytes()) {
-            Ok(_) => panic!("Should be an error!"),
+            Result::Ok(_) => panic!("Should be an error!"),
             Err(e) => assert_eq!(e, FileSystemError::FileTooBig(sys.max_file_size())),
         }
     }
@@ -1091,7 +1243,7 @@ mod tests {
             sys.close(f).unwrap();
         }
         match sys.open_create("Final") {
-            Ok(_) => panic!("This should be an error!"),
+            Result::Ok(_) => panic!("This should be an error!"),
             Err(e) => assert_eq!(e, FileSystemError::TooManyFiles(sys.max_files_stored())),
         }
     }
@@ -1104,7 +1256,7 @@ mod tests {
             let f = sys.open_create(filename.as_str()).unwrap();
             for j in 0..sys.max_file_size() - 1 {
                 match sys.write(f, "A".as_bytes()) {
-                    Ok(_) => {}
+                    Result::Ok(_) => {}
                     Err(e) => {
                         assert_eq!(i, 30);
                         assert_eq!(j, 191);
