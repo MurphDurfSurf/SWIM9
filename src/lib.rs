@@ -202,7 +202,7 @@ impl<
     pub fn save_file_bytes(&mut self, inode: &Inode<MAX_FILE_BLOCKS, BLOCK_SIZE>) {
         
         let mut offset = 0;
-        for i in 00..self.num_inode_blocks() {
+        for i in 00..inode.blocks_used() {
             let reference = inode.blocks[i];
 
             // Read the current block's data into the block buffer
@@ -453,16 +453,26 @@ impl<
 
     pub fn open_read(&mut self, filename: &str) -> anyhow::Result<usize, FileSystemError> {
         let (inode_num, inode) = self.inode_for(filename)?;
-         if self.open_inodes[inode_num] { 
-            return Err(FileSystemError::AlreadyOpen);
-         }
-         let fd = self.find_lowest_fd().ok_or(FileSystemError::TooManyOpen(MAX_OPEN))?;
-         let mut info = FileInfo::read(inode, inode_num); 
-         let block_num = info.inode.blocks[0] as usize; 
-         self.disk.read(block_num, &mut info.block_buffer).unwrap();
-         self.open[fd] = Some(info); 
-         self.open_inodes[inode_num] = true; 
-         Ok(fd)
+
+        // Check if the file is already open
+        if self.open_inodes[inode_num] {
+            return Err(FileSystemError::AlreadyOpen);  // File is already open
+        }
+        // Find the lowest available file descriptor
+        let fd = self.find_lowest_fd().ok_or(FileSystemError::TooManyOpen(MAX_OPEN))?;
+
+        // Create a FileInfo for the read operation
+        let mut info = FileInfo::read(inode, inode_num);
+
+        // Read the first block of the file into the block buffer
+        let block_num = info.inode.blocks[0] as usize;
+        self.disk.read(block_num, &mut info.block_buffer).unwrap();
+
+        // Update the open file table and mark the inode as open
+        self.open[fd] = Some(info);
+        self.open_inodes[inode_num] = true;
+
+        Ok(fd)
         //todo!("Open the file to read");
         // Call `inode_for()` to get the file's inode.
         // * If the `open_inodes` table is already `true`, return AlreadyOpen.
@@ -478,9 +488,15 @@ impl<
         if filename.len() > MAX_FILENAME_BYTES {
             return Err(FileSystemError::FilenameTooLong(MAX_FILENAME_BYTES));
         }
+    
+        // Try to find the inode for the given filename
         match self.inode_for(filename) {
-            Result::Ok((inode_num, inode)) => self.open_create_reset(inode_num, inode),
+            Ok((inode_num, inode)) => {
+                // If the file exists, reset it
+                self.open_create_reset(inode_num, inode)
+            }
             Err(e) => match e {
+                // If file not found, create a new file
                 FileSystemError::FileNotFound => self.open_create_new(filename),
                 other => Err(other),
             },
@@ -489,18 +505,37 @@ impl<
 
     pub fn open_create_new(&mut self, filename: &str) -> anyhow::Result<usize, FileSystemError> {
         let mut di = self.directory_inode();
+        println!("directory inode: {di:?}");
+    
+        // Find the lowest available inode number
         let inode_num = self.find_lowest_zero_bit_in(INODE_FULL_BLOCK).ok_or(FileSystemError::TooManyFiles(MAX_FILES_STORED))?;
+        println!("inode_num: {inode_num}");
+        
         if inode_num >= MAX_FILES_STORED {
             return Err(FileSystemError::TooManyFiles(MAX_FILES_STORED));
         }
+
+        // Request the first data block for the new file
         let block = self.request_data_block()?;
+        println!("data block: {block}");
+
+        // Create the directory entry for the new file
         self.create_directory_entry(filename, inode_num, &mut di)?;
+        println!("directory inode, part 2: {di:?}");
+
+        // Initialize the new file's inode
         let inode = self.initialize_new_file(inode_num, block);
+        println!("new file inode: {inode:?}");
+
+        // Find the lowest available file descriptor
         let fd = self.find_lowest_fd().ok_or(FileSystemError::TooManyOpen(MAX_OPEN))?;
+
+        // Create a new FileInfo entry for the file
         let info = FileInfo::write(inode, inode_num);
         self.open[fd] = Some(info);
         self.open_inodes[inode_num] = true;
-        Ok(fd)
+
+        Ok(fd)              
 
         //todo!("Create a new file");
         // Call directory_inode() to get the directory inode.
@@ -518,7 +553,33 @@ impl<
         inode_num: usize,
         directory_inode: &mut Inode<MAX_FILE_BLOCKS, BLOCK_SIZE>,
     ) -> anyhow::Result<(), FileSystemError> {
-        todo!("Create a new entry in the directory file");
+        self.load_directory()?;
+
+        // Find the offset for the new directory entry
+        let offset = inode_num * MAX_FILENAME_BYTES;
+        let bytes = filename.as_bytes();
+    
+        // Copy the filename into the content buffer at the correct position
+        for i in 0..MAX_FILENAME_BYTES {
+            self.file_content_buffer[offset + i] = if i < bytes.len() { bytes[i] } else { 0 };
+        }
+    
+        // Handle the case when more space is needed in the directory block
+        directory_inode.bytes_stored = (offset + MAX_FILENAME_BYTES) as u16;
+        if  directory_inode.bytes_stored > BLOCK_SIZE as u16 {
+            // Request a new data block if the directory block is full
+            let new_block = self.request_data_block()?;
+            directory_inode.blocks[directory_inode.blocks_used()] = new_block;
+        }
+    
+        println!("directory inode after create directory entry: {directory_inode:?}");
+        // Save the updated directory inode and its data
+        self.save_file_bytes(directory_inode);
+        self.assert_block(7, offset, bytes);
+        self.save_inode(0, directory_inode);
+    
+        Ok(())
+        //todo!("Create a new entry in the directory file");
         // Call `load_directory()` to get the directory file into the file contents buffer.
         // Calculate the array entry in the file content buffer for the inode number.
         // Copy the characters in the filename into the content buffer starting at that location.
@@ -532,77 +593,173 @@ impl<
 
     pub fn close(&mut self, fd: usize) -> anyhow::Result<(), FileSystemError> {
         let Some(data) = &self.open[fd] else {
-            return Err(FileSystemError::FileNotFound);
+            return Err(FileSystemError::FileNotFound);  // Return error if the file is not found
         };
         let inode_num = data.inode_num;
         let writing = data.writing;
         let inode = data.inode.clone();
-        if writing {
-            self.save_inode(inode_num, &inode);
-        }
-        self.open[fd] = None;
-        self.open_inodes[inode_num] = false;
-        Ok(())
         
-        //todo!("Close the file.");
-        // * If the file isn't open, return FileNotOpen.
-        // If the file is open to write, save its updated inode.
-        // Set its `open` entry to `None` and its `open_inodes` entry to `false`.
+        if writing {
+            self.save_inode(inode_num, &inode);  // Save the inode if the file was being written to
+        }
+        
+        self.open[fd] = None;  // Mark the file descriptor as unused
+        self.open_inodes[inode_num] = false;  // Mark the inode as unused
+        Ok(())
     }
+    
 
     pub fn read(&mut self, fd: usize, buffer: &mut [u8]) -> anyhow::Result<usize, FileSystemError> {
-        todo!("Read from `fd` until `buffer` is full or there is no data left.");
-        // Use the `open` table entry to determine how much of the file we have read.
-        // * If it isn't open, return FileNotOpen.
-        // * If it's open to write, return NotOpenForRead.
-        // * If there isn't anything left to read, return 0.
-        // Calculate the number of bytes you can read, based on the number left to read and the buffer size.
-        // Load each block from disk as you need them into the block buffer of the `FileInfo` object for this file.
-        // Copy each byte into `buffer` from the block buffer.
-        // Update your FileInfo object as needed.
-        // Return the total number of bytes read when finished.
+        let Some(info) = &mut self.open[fd] else {
+            return Err(FileSystemError::FileNotOpen);
+        };
+    
+        if info.writing {
+            return Err(FileSystemError::NotOpenForRead);  // Cannot read if file is open for writing
+        }
+    
+        let mut count = 0;
+        while count < buffer.len() && info.offset < info.inode.bytes_stored as usize {
+            if info.offset % BLOCK_SIZE == 0 {
+                let block = info.inode.blocks[info.current_block] as usize;
+                self.disk.read(block, &mut info.block_buffer).unwrap();  // Read the block from disk
+            }
+            
+            buffer[count] = info.block_buffer[info.offset % BLOCK_SIZE];  // Copy byte from block buffer
+            info.offset += 1;
+    
+            if info.offset % BLOCK_SIZE == 0 {
+                info.current_block += 1;  // Move to the next block if current block is filled
+            }
+            count += 1;
+        }
+    
+        Ok(count)  // Return the number of bytes read
     }
+    
 
     pub fn write(&mut self, fd: usize, buffer: &[u8]) -> anyhow::Result<(), FileSystemError> {
-        todo!("Write to `fd` until `buffer` is empty.");
-        // Examine the FileInfo object from `open` for this file.
-        // * If it doesn't have an entry, return FileNotOpen.
-        // * If not open for writing, return NotOpenForWrite.
-        // Copy each byte from `buffer` into the FileInfo object's block buffer.
-        // * If the block buffer fills up before `buffer` is empty:
-        //   * Write the current block buffer contents to disk.
-        //     * If the file exceeds the maximum size, return FileTooBig.
-        //   * Request a new data block.
-        //   * Be sure to update your inode!
-        // * When finished, make sure to write the current block to disk.
+        for &b in buffer {
+            let info = self.open[fd].as_mut().ok_or(FileSystemError::FileNotOpen)?;
+    
+            if !info.writing {
+                return Err(FileSystemError::NotOpenForWrite);  // File must be open for writing
+            }
+            if info.offset >= MAX_FILE_BYTES {
+                return Err(FileSystemError::FileTooBig(MAX_FILE_BYTES));  // File exceeds max size
+            }
+    
+            info.block_buffer[info.offset % BLOCK_SIZE] = b;  // Write the byte to the block buffer
+            info.offset += 1;
+    
+            let block_full;
+            let current_block;
+            {
+                let info = self.open[fd].as_ref().unwrap();
+                block_full = info.offset % BLOCK_SIZE == 0;
+                current_block = info.current_block;
+            }
+    
+            if block_full {
+                let (block_num, buffer_copy) = {
+                    let info = self.open[fd].as_ref().unwrap();
+                    (info.inode.blocks[current_block] as usize, info.block_buffer)
+                };
+    
+                self.disk.write(block_num, &buffer_copy).unwrap();  // Write the block to disk
+    
+                // Check if we need a new block
+                let needs_new_block;
+                {
+                    let info = self.open[fd].as_ref().unwrap();
+                    needs_new_block = info.current_block + 1 < MAX_FILE_BLOCKS;
+                }
+    
+                if needs_new_block {
+                    let next_block = self.request_data_block()?;
+                    let info = self.open[fd].as_mut().unwrap();
+                    info.current_block += 1;
+                    info.inode.blocks[info.current_block] = next_block;
+                } else {
+                    // return error
+                    let info = self.open[fd].as_mut().unwrap();
+                    info.current_block += 1;
+                }
+            }
+        }
+    
+        // Update the inode with the new bytes stored
+        let (block_num, buffer_copy) = {
+            let info = self.open[fd].as_ref().unwrap();
+            (info.inode.blocks[info.current_block] as usize, info.block_buffer)
+        };
+        self.disk.write(block_num, &buffer_copy).unwrap();
+        let info = self.open[fd].as_mut().unwrap();
+        info.inode.bytes_stored = info.offset as u16;
+        // save inode
+    
+        Ok(())
     }
+    
 
     pub fn open_create_reset(
         &mut self,
         inode_num: usize,
         mut inode: Inode<MAX_FILE_BLOCKS, BLOCK_SIZE>,
     ) -> anyhow::Result<usize, FileSystemError> {
-        todo!("Overwrite an existing file.");
-        // Load the DATA_FULL_BLOCK into the block buffer.
-        // Clear all of the currently-used blocks for this file in the DATA_FULL_BLOCK.
-        // Write that block back to disk.
-        // Update the inode for this file accordingly.
-        // Call `save_inode()` to write it back to disk.
-        // Create an entry for the file in the file table.
-        // Return its file descriptor.
+        // Load DATA_FULL_BLOCK into block buffer
+        self.disk.read(DATA_FULL_BLOCK, &mut self.block_buffer).unwrap();
+        
+        // Clear the blocks in the DATA_FULL_BLOCK for the file
+        for i in 0..inode.blocks_used() {
+            let block = inode.blocks[i] as usize;
+            let byte = block / 8;
+            let bit = block % 8;
+            self.block_buffer[byte] &= !(1 << bit);  // Clear the bit in the bitmap
+        }
+        self.disk.write(DATA_FULL_BLOCK, &self.block_buffer).unwrap();  // Write the updated bitmap
+    
+        // Reset inode's stored data
+        inode.bytes_stored = 0;
+        for i in 1..MAX_FILE_BLOCKS {
+            inode.blocks[i] = 0;  // Clear the blocks array
+        }
+        
+        self.save_inode(inode_num, &inode);  // Save the updated inode
+        
+        // Find the lowest available file descriptor
+        let fd = self.find_lowest_fd().ok_or(FileSystemError::TooManyOpen(MAX_OPEN))?;
+        
+        // Create a new FileInfo entry and assign it to open
+        let info = FileInfo::write(inode, inode_num);
+        self.open[fd] = Some(info);
+        self.open_inodes[inode_num] = true;  // Mark the inode as open
+        
+        Ok(fd)  // Return the file descriptor
     }
+    
 
     pub fn open_append(&mut self, filename: &str) -> anyhow::Result<usize, FileSystemError> {
-        todo!("Open a file to append");
-        // Call `inode_for()` to get the file's inode.
-        // Pick a file descriptor to use for the file.
-        // Call FileInfo::write_inside() to create a FileInfo object for the `open` table.
-        // * This enables us to set up the current block and offset to match the file size from
-        //   its inode.
-        // Read the current block into the FileInfo's block buffer.
-        // Updated `open` and `open_inodes`.
-        // Return the file descriptor.
+        let (inode_num, inode) = self.inode_for(filename)?;
+        
+        // Find the lowest available file descriptor
+        let fd = self.find_lowest_fd().ok_or(FileSystemError::TooManyOpen(MAX_OPEN))?;
+        
+        // Set up the FileInfo for the append operation
+        let mut info = FileInfo::write(inode, inode_num);
+        info.offset = info.inode.bytes_stored as usize;
+        info.current_block = info.offset / BLOCK_SIZE;
+        
+        let block_num = info.inode.blocks[info.current_block] as usize;
+        self.disk.read(block_num, &mut info.block_buffer).unwrap();  // Read the current block
+    
+        // Assign the FileInfo to the open table
+        self.open[fd] = Some(info);
+        self.open_inodes[inode_num] = true;  // Mark the inode as open
+    
+        Ok(fd)  // Return the file descriptor
     }
+    
 }
 
 #[derive(Debug, Copy, Clone)]
