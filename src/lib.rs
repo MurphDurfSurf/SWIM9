@@ -8,10 +8,14 @@ use core::result::Result::Err;
 use core::iter::Iterator;
 use core::option::Option::Some;
 use core::option::Option::None;
+use core::option::Option;
+use core::assert_eq;
+use core::assert;
 
 use core::cmp::{max, min};
 
-#[derive(Copy, Clone, Eq, PartialEq, Debug, Error)]
+#[derive(Copy, Clone, Eq, PartialEq, Error)]
+#[derive(Debug)]
 pub enum FileSystemError {
     #[error("File not found")]
     FileNotFound,
