@@ -327,7 +327,7 @@ impl<
     fn mark_inode_blocks_in_use(&mut self) { // NEED TO FIX --------------------------------------------------------------
         for i in 0..self.num_inode_blocks() {
             let block = 2 + i;
-            println!("Marking block {} as in use", block);
+            //println!("Marking block {} as in use", block);
             self.activate_bit(block, DATA_FULL_BLOCK);
         }
         self.activate_bit(0, DATA_FULL_BLOCK);
@@ -346,11 +346,11 @@ impl<
         inode.blocks = [first_block; MAX_FILE_BLOCKS];
         // Step 2: Save the inode to the inode table.
         self.save_inode(inode_num, &inode);
-        println!("ACTIVATING bits!");
+        //println!("ACTIVATING bits!");
         // Step 3: Activate the inode bit in INODE_FULL_BLOCK and the first block bit in DATA_FULL_BLOCK.
         self.activate_bit(inode_num, INODE_FULL_BLOCK);  // Activate the inode bit in INODE_FULL_BLOCK
         self.activate_bit(self.first_data_block(), DATA_FULL_BLOCK);  // Activate the first data block in DATA_FULL_BLOCK
-        println!("Clearing!");
+        //println!("Clearing!");
         // Step 4: Clear the block buffer and write it out to first_block on disk.
         self.clear_block_buffer();  // Clears the block buffer
         self.disk.write(first_block as usize, &self.block_buffer).unwrap();  // Write the cleared buffer to the first block
@@ -518,11 +518,11 @@ impl<
 
     pub fn open_create_new(&mut self, filename: &str) -> Result::<usize, FileSystemError> {
         let mut di = self.directory_inode();
-        println!("directory inode: {di:?}");
+        //println!("directory inode: {di:?}");
     
         // Find the lowest available inode number
         let inode_num = self.find_lowest_zero_bit_in(INODE_FULL_BLOCK).ok_or(FileSystemError::TooManyFiles(MAX_FILES_STORED))?;
-        println!("inode_num: {inode_num}");
+        //println!("inode_num: {inode_num}");
         
         if inode_num >= MAX_FILES_STORED {
             return Err(FileSystemError::TooManyFiles(MAX_FILES_STORED));
@@ -530,15 +530,15 @@ impl<
 
         // Request the first data block for the new file
         let block = self.request_data_block()?;
-        println!("data block: {block}");
+        //println!("data block: {block}");
 
         // Create the directory entry for the new file
         self.create_directory_entry(filename, inode_num, &mut di)?;
-        println!("directory inode, part 2: {di:?}");
+        //println!("directory inode, part 2: {di:?}");
 
         // Initialize the new file's inode
         let inode = self.initialize_new_file(inode_num, block);
-        println!("new file inode: {inode:?}");
+        //println!("new file inode: {inode:?}");
 
         // Find the lowest available file descriptor
         let fd = self.find_lowest_fd().ok_or(FileSystemError::TooManyOpen(MAX_OPEN))?;
@@ -585,7 +585,7 @@ impl<
             directory_inode.blocks[directory_inode.blocks_used()] = new_block;
         }
     
-        println!("directory inode after create directory entry: {directory_inode:?}");
+        //println!("directory inode after create directory entry: {directory_inode:?}");
         // Save the updated directory inode and its data
         self.save_file_bytes(directory_inode);
         self.assert_block(7, offset, bytes);
