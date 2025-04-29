@@ -92,7 +92,7 @@ impl<
         assert!(MAX_FILES_STORED <= block_bits);
         assert!(MAX_FILES_STORED <= u16::MAX as usize);
         let result = Self {
-            open: [None; MAX_OPEN],
+            open: [const { None }; MAX_OPEN],
             disk,
             block_buffer: [0; BLOCK_SIZE],
             file_content_buffer: [0; MAX_FILE_BYTES],
