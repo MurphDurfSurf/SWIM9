@@ -1,4 +1,4 @@
-//#![cfg_attr(not(test), no_std)]
+#![cfg_attr(not(test), no_std)]
 use thiserror_no_std::Error;
 
 use core::result::Result;
