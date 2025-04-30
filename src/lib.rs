@@ -588,7 +588,6 @@ impl<
         //println!("directory inode after create directory entry: {directory_inode:?}");
         // Save the updated directory inode and its data
         self.save_file_bytes(directory_inode);
-        self.assert_block(7, offset, bytes);
         self.save_inode(0, directory_inode);
     
         Ok(())
